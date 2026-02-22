@@ -345,7 +345,6 @@ function SetupPage() {
                 <h6 style={{ marginTop: 0, marginBottom: '0.5rem', fontSize: '0.95rem' }}>Important Notes</h6>
                 <ul style={{ marginTop: 0, marginBottom: 0, paddingLeft: '1.25rem' }}>
                   <li>Direct Gemini endpoint does not work, OpenAI and Anthropic are also expected to fail due to CORS policies. These model families are available through Open Router, which does work </li>
-                  <li>Many openAI style endpoints should work depending on their CORS policies</li>
                 </ul>
               </div>
             </div>
