@@ -130,7 +130,7 @@ function StartPage() {
           <div>
             <strong>Did humans or AI create this app?</strong>
             <p style={{ marginTop: '0.5rem', lineHeight: '1.8' }}>
-              This app was coded using a variety of different LLMs. A human worked with AI to refine the functionality. Use at own risk. Source code is open source and available on github for review https://github.com/noah-schroeder/AIDE
+              This app was coded using a variety of different LLMs. A human worked with AI to refine the functionality. Use at own risk. Source code is open source and available on github for review <a href="https://github.com/noah-schroeder/AIDE-Web">on Github)</a> 
             </p>
           </div>
         </div>
