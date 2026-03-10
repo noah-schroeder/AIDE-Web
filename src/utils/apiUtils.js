@@ -65,7 +65,6 @@ IMPORTANT:
     const requestBody = {
       model: model, // Use the model passed in directly
       messages: messages,
-      temperature: 0.1, // Low temperature for consistent extraction
       response_format: { type: 'json_object' } // Request JSON response if supported
     };
 
