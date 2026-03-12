@@ -141,13 +141,13 @@ Use "Not found" when evidence is not present.`;
       );
     }
 
-    console.log('Full API response:', data);
+    // console.log('Full API response:', data);
     
     // Extract structured output from either message.content or tool_calls.
     const message = data.choices?.[0]?.message || {};
     const toolCalls = message.tool_calls || [];
-    console.log('Raw LLM message content:', message.content);
-    console.log('Raw LLM tool calls:', toolCalls);
+    // console.log('Raw LLM message content:', message.content);
+    // console.log('Raw LLM tool calls:', toolCalls);
 
     const contentToText = (value) => {
       if (typeof value === 'string') {
