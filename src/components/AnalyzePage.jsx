@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Play, FileText, AlertCircle, SkipForward, Cpu, CheckCircle, Info } from 'lucide-react';
 import PDFViewer from './PDFViewer';
 import CodingPrompts from './CodingPrompts';
-import { extractTextFromPDF } from '../utils/pdfUtils';
+import { extractTextFromPDF, fileToBase64 } from '../utils/pdfUtils';
 import { callLLMAPI } from '../utils/apiUtils';
 
 function AnalyzePage() {
@@ -141,7 +141,7 @@ function AnalyzePage() {
       if (pdfMode === 'send-pdf') {
         setAnalysisProgress('Converting PDF to base64...');
         const base64PDF = await fileToBase64(pdfFile);
-        content = { type: 'pdf', data: base64PDF, fileName: pdfFile.name };
+        content = { type: 'pdf', data: base64PDF, fileName: pdfFile.name, textFallback: pdfText };
       } else {
         setAnalysisProgress('Extracting text from PDF...');
         content = { type: 'text', data: pdfText };
@@ -153,7 +153,8 @@ function AnalyzePage() {
         apiConfig.model,
         prompts,
         content,
-        apiConfig.contextWindow
+        apiConfig.contextWindow,
+        (msg) => setAnalysisProgress(msg)
       );
       setAnalysisProgress('Processing results...');
       setResponses(result.responses);
@@ -164,13 +165,6 @@ function AnalyzePage() {
       setIsAnalyzing(false);
     }
   };
-
-  const fileToBase64 = (file) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(',')[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 
   const canAnalyze = pdfFile && codingFormData && apiConfig && !isAnalyzing;
 

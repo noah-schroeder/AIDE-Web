@@ -2,8 +2,7 @@ import React, { useState, useEffect } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { ZoomIn, ZoomOut, ExternalLink } from 'lucide-react';
 
-// Set up the worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+// Worker is configured in pdfUtils.js (imported by AnalyzePage before this component renders)
 
 // Render once at a high resolution; zoom is handled purely via CSS width
 const BASE_SCALE = 2.0;

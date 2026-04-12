@@ -228,6 +228,12 @@ function extractCandidatePayloads(data) {
   const message = data?.choices?.[0]?.message;
   const toolCalls = message?.tool_calls || [];
 
+  // Prioritize tool_calls over message.content — when providers return structured
+  // data via function calling, content is often null or a non-JSON acknowledgment.
+  toolCalls.forEach((toolCall, index) => {
+    addCandidate(toolCall?.function?.arguments, `tool_calls[${index}].function.arguments`);
+  });
+
   addCandidate(message?.content, 'choices[0].message.content');
   addCandidate(data?.choices?.[0]?.text, 'choices[0].text');
   addCandidate(data?.message?.content, 'message.content');
@@ -237,10 +243,6 @@ function extractCandidatePayloads(data) {
   addCandidate(data?.response, 'response');
   addCandidate(data?.responses, 'responses');
   addCandidate(data, 'top-level response');
-
-  toolCalls.forEach((toolCall, index) => {
-    addCandidate(toolCall?.function?.arguments, `tool_calls[${index}].function.arguments`);
-  });
 
   return candidates;
 }
@@ -281,6 +283,36 @@ function parseStructuredResponse(data) {
   return null;
 }
 
+function looksLikeResponseRow(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  const keys = Object.keys(obj);
+  const answerKeys = ['response', 'answer', 'value', 'result', 'text', 'extracted_value'];
+  const contextKeys = ['prompt', 'question', 'source', 'evidence', 'quote', 'page', 'page_number'];
+  const hasAnswer = answerKeys.some((k) => keys.includes(k));
+  const hasContext = contextKeys.some((k) => keys.includes(k));
+  return hasAnswer && hasContext;
+}
+
+function findNestedResponseArray(obj, depth = 0) {
+  if (depth > 2 || !obj || typeof obj !== 'object') return null;
+  if (Array.isArray(obj)) {
+    if (obj.length > 0 && looksLikeResponseRow(obj[0])) return obj;
+    return null;
+  }
+  for (const value of Object.values(obj)) {
+    if (Array.isArray(value) && value.length > 0 && looksLikeResponseRow(value[0])) {
+      return value;
+    }
+  }
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const found = findNestedResponseArray(value, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function normalizeParsedResponse(parsedResponse) {
   if (Array.isArray(parsedResponse)) {
     return { responses: parsedResponse };
@@ -296,6 +328,24 @@ function normalizeParsedResponse(parsedResponse) {
 
   if (Array.isArray(parsedResponse.items)) {
     return { responses: parsedResponse.items };
+  }
+
+  const alternateKeys = ['results', 'answers', 'output', 'extracted_data', 'extractions'];
+  for (const key of alternateKeys) {
+    if (Array.isArray(parsedResponse[key])) {
+      return { responses: parsedResponse[key] };
+    }
+  }
+
+  // Detect single unwrapped response object
+  if (looksLikeResponseRow(parsedResponse)) {
+    return { responses: [parsedResponse] };
+  }
+
+  // Deep-scan fallback: search nested objects for response-shaped arrays
+  const nestedArray = findNestedResponseArray(parsedResponse);
+  if (nestedArray) {
+    return { responses: nestedArray };
   }
 
   const responsesValue = parsedResponse.responses;
@@ -317,10 +367,105 @@ function normalizeParsedResponse(parsedResponse) {
 function normalizeResponseRow(prompt, existing) {
   return {
     prompt,
-    response: String(existing?.response || existing?.answer || existing?.value || 'Not found'),
-    source: String(existing?.source || existing?.evidence || existing?.quote || 'Not found'),
-    page: String(existing?.page || existing?.pageNumber || existing?.location || 'N/A')
+    response: String(existing?.response ?? existing?.answer ?? existing?.value ?? existing?.result ?? existing?.extracted_value ?? existing?.text ?? 'Not found'),
+    source: String(existing?.source ?? existing?.evidence ?? existing?.quote ?? existing?.supporting_text ?? existing?.excerpt ?? existing?.citation ?? 'Not found'),
+    page: String(existing?.page ?? existing?.pageNumber ?? existing?.page_number ?? existing?.page_num ?? existing?.location ?? 'N/A')
   };
+}
+
+const MAX_RETRIES = 3;
+const MAX_BACKOFF_MS = 30000;
+const REQUEST_TIMEOUT_MS = 120000;
+
+function isRetryableStatus(status) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+function getBackoffDelay(attempt) {
+  const base = Math.min(1000 * Math.pow(2, attempt), MAX_BACKOFF_MS);
+  const jitter = base * (0.8 + Math.random() * 0.4);
+  return Math.round(jitter);
+}
+
+function parseRetryAfter(headerValue) {
+  if (!headerValue) return null;
+  const seconds = Number(headerValue);
+  if (!Number.isNaN(seconds) && seconds > 0) return seconds * 1000;
+  const dateMs = Date.parse(headerValue);
+  if (!Number.isNaN(dateMs)) return Math.max(0, dateMs - Date.now());
+  return null;
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)} seconds`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+const DEFAULT_CONTEXT_BUDGET = 8192;
+const OVERHEAD_PER_PROMPT_TOKENS = 100;
+const SYSTEM_OVERHEAD_TOKENS = 200;
+
+function estimateTokenCount(text) {
+  return text ? Math.ceil(text.length / 4) : 0;
+}
+
+function splitTextIntoChunks(fullText, maxTokensPerChunk) {
+  const pagePattern = /\n--- Page \d+ ---\n/;
+  const pages = fullText.split(pagePattern).filter((p) => p.trim());
+
+  if (pages.length <= 1) return [fullText];
+
+  // Reconstruct page markers from the original text
+  const pageMarkers = fullText.match(/\n--- Page \d+ ---\n/g) || [];
+
+  const chunks = [];
+  let currentChunk = '';
+  let currentTokens = 0;
+
+  for (let i = 0; i < pages.length; i++) {
+    const marker = pageMarkers[i] || `\n--- Page ${i + 1} ---\n`;
+    const pageWithMarker = marker + pages[i];
+    const pageTokens = estimateTokenCount(pageWithMarker);
+
+    if (currentChunk && currentTokens + pageTokens > maxTokensPerChunk) {
+      chunks.push(currentChunk);
+      currentChunk = pageWithMarker;
+      currentTokens = pageTokens;
+    } else {
+      currentChunk += pageWithMarker;
+      currentTokens += pageTokens;
+    }
+  }
+
+  if (currentChunk) chunks.push(currentChunk);
+  return chunks;
+}
+
+function mergeChunkedResponses(chunkResults, prompts) {
+  return prompts.map((prompt, index) => {
+    for (const result of chunkResults) {
+      const row = result.responses[index];
+      if (row && row.response !== 'Not found') {
+        return row;
+      }
+    }
+    return chunkResults[0]?.responses[index] || {
+      prompt,
+      response: 'Not found',
+      source: 'Not found',
+      page: 'N/A'
+    };
+  });
 }
 
 /**
@@ -331,36 +476,86 @@ function normalizeResponseRow(prompt, existing) {
  * @param {Array<string>} prompts - Array of prompts
  * @param {Object} content - Content object with type and data
  * @param {number|null} contextWindow - Optional context window size
+ * @param {Function|null} onProgress - Optional progress callback
  * @returns {Promise<Object>} - Structured response
  */
-export async function callLLMAPI(endpoint, apiKey, model, prompts, content, contextWindow = null) {
+export async function callLLMAPI(endpoint, apiKey, model, prompts, content, contextWindow = null, onProgress = null) {
   try {
+    // Auto-chunk large text content
+    if (content.type === 'text') {
+      const effectiveBudget = (contextWindow || DEFAULT_CONTEXT_BUDGET)
+        - SYSTEM_OVERHEAD_TOKENS
+        - estimateTokenCount(prompts.join('\n'))
+        - (prompts.length * OVERHEAD_PER_PROMPT_TOKENS);
+
+      const contentTokens = estimateTokenCount(content.data);
+      if (contentTokens > effectiveBudget && effectiveBudget > 0) {
+        const chunks = splitTextIntoChunks(content.data, effectiveBudget);
+        if (chunks.length > 1) {
+          const chunkResults = [];
+          for (let i = 0; i < chunks.length; i++) {
+            if (onProgress) onProgress(`Processing chunk ${i + 1} of ${chunks.length}...`);
+            const chunkContent = { type: 'text', data: chunks[i] };
+            const result = await callLLMAPI(endpoint, apiKey, model, prompts, chunkContent, contextWindow, onProgress);
+            chunkResults.push(result);
+          }
+          return { responses: mergeChunkedResponses(chunkResults, prompts) };
+        }
+      }
+    }
+
     const systemMessage = `You are a data extraction assistant for systematic reviews and meta-analysis.
 Extract the requested information from the provided document.
 Be accurate and concise.
 Use "Not found" when evidence is not present.`;
 
     let documentSection = '';
+    let userContent;
     if (content.type === 'text') {
       documentSection = `Document Text:\n${content.data}\n\n`;
     } else if (content.type === 'pdf') {
-      documentSection = `[PDF Document: ${content.fileName}]\n\n`;
+      documentSection = '';
     }
 
     const promptList = prompts
       .map((prompt, index) => `${index + 1}. ${prompt}`)
       .join('\n');
 
-    const baseUserMessage = `${documentSection}Prompts to answer:\n${promptList}\n\nPlease extract the requested information and return it as a JSON object with the format specified.`;
+    const promptSection = `${documentSection}Prompts to answer:\n${promptList}\n\nPlease extract the requested information and return it as a JSON object with the format specified.`;
+
+    if (content.type === 'pdf' && content.data) {
+      userContent = [
+        {
+          type: 'file',
+          file: {
+            filename: content.fileName,
+            file_data: `data:application/pdf;base64,${content.data}`
+          }
+        },
+        {
+          type: 'text',
+          text: `Prompts to answer:\n${promptList}\n\nPlease extract the requested information and return it as a JSON object with the format specified.`
+        }
+      ];
+    } else {
+      userContent = promptSection;
+    }
+
+    const baseUserMessage = promptSection;
 
     const messages = [
       { role: 'system', content: systemMessage },
-      { role: 'user', content: baseUserMessage }
+      { role: 'user', content: userContent }
     ];
+
+    // For prompt-only fallback, PDF binary can't be embedded — use text fallback
+    const promptOnlyTextContent = content.type === 'pdf' && content.textFallback
+      ? `Document Text:\n${content.textFallback}\n\nPrompts to answer:\n${promptList}\n\nPlease extract the requested information and return it as a JSON object with the format specified.`
+      : baseUserMessage;
 
     const promptOnlyMessages = [
       { role: 'system', content: `${systemMessage}\n${RESPONSE_SHAPE_GUIDANCE}` },
-      { role: 'user', content: `${baseUserMessage}\n\n${RESPONSE_SHAPE_GUIDANCE}` }
+      { role: 'user', content: `${promptOnlyTextContent}\n\n${RESPONSE_SHAPE_GUIDANCE}` }
     ];
 
     const withOptionalMaxTokens = (body) => (
@@ -377,8 +572,14 @@ Use "Not found" when evidence is not present.`;
           strict: true,
           schema: responseSchema
         }
-      },
-      tools: [extractionTool]
+      }
+    });
+
+    const toolCallingRequestBody = withOptionalMaxTokens({
+      model,
+      messages,
+      tools: [extractionTool],
+      tool_choice: { type: 'function', function: { name: 'submit_extraction' } }
     });
 
     const jsonModeRequestBody = withOptionalMaxTokens({
@@ -393,18 +594,38 @@ Use "Not found" when evidence is not present.`;
     });
 
     const sendRequest = async (body, mode) => {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify(body)
-      });
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const response = await fetchWithTimeout(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify(body)
+          });
 
-      const rawText = await response.text();
-      const payload = tryParseJson(rawText) || { rawText };
-      return { response, payload, mode };
+          if (isRetryableStatus(response.status) && attempt < MAX_RETRIES) {
+            const retryAfter = parseRetryAfter(response.headers.get('Retry-After'));
+            const delay = retryAfter ?? getBackoffDelay(attempt);
+            console.warn(`Request returned ${response.status}. Retrying in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+
+          const rawText = await response.text();
+          const payload = tryParseJson(rawText) || { rawText };
+          return { response, payload, mode };
+        } catch (error) {
+          if (attempt < MAX_RETRIES && error.message?.includes('timed out')) {
+            const delay = getBackoffDelay(attempt);
+            console.warn(`Request timed out. Retrying in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+          throw error;
+        }
+      }
     };
 
     let requestResult = await sendRequest(structuredRequestBody, 'json_schema');
@@ -416,18 +637,30 @@ Use "Not found" when evidence is not present.`;
         STRUCTURED_OUTPUT_UNSUPPORTED_PATTERN.test(backendMessage);
 
       if (shouldFallback) {
-        console.warn('Structured output request unsupported. Retrying with json_object mode.');
-        requestResult = await sendRequest(jsonModeRequestBody, 'json_object');
+        console.warn('Structured output request unsupported. Retrying with tool calling mode.');
+        requestResult = await sendRequest(toolCallingRequestBody, 'tool_calling');
 
         if (!requestResult.response.ok) {
-          const jsonModeMessage = extractBackendErrorMessage(requestResult.payload);
-          const shouldUsePromptOnlyFallback =
+          const toolMessage = extractBackendErrorMessage(requestResult.payload);
+          const shouldFallbackFromTools =
             requestResult.response.status === 400 &&
-            STRUCTURED_OUTPUT_UNSUPPORTED_PATTERN.test(jsonModeMessage);
+            STRUCTURED_OUTPUT_UNSUPPORTED_PATTERN.test(toolMessage);
 
-          if (shouldUsePromptOnlyFallback) {
-            console.warn('json_object mode unsupported. Retrying with prompt-only JSON instructions.');
-            requestResult = await sendRequest(promptOnlyRequestBody, 'prompt_only');
+          if (shouldFallbackFromTools) {
+            console.warn('Tool calling mode unsupported. Retrying with json_object mode.');
+            requestResult = await sendRequest(jsonModeRequestBody, 'json_object');
+
+            if (!requestResult.response.ok) {
+              const jsonModeMessage = extractBackendErrorMessage(requestResult.payload);
+              const shouldUsePromptOnlyFallback =
+                requestResult.response.status === 400 &&
+                STRUCTURED_OUTPUT_UNSUPPORTED_PATTERN.test(jsonModeMessage);
+
+              if (shouldUsePromptOnlyFallback) {
+                console.warn('json_object mode unsupported. Retrying with prompt-only JSON instructions.');
+                requestResult = await sendRequest(promptOnlyRequestBody, 'prompt_only');
+              }
+            }
           }
         }
       }
@@ -484,7 +717,7 @@ Use "Not found" when evidence is not present.`;
  */
 export async function testAPIConnection(endpoint, apiKey, model) {
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetchWithTimeout(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
