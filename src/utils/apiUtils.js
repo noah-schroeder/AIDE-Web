@@ -173,6 +173,10 @@ function extractBackendErrorMessage(payload) {
   }
 
   if (typeof payload === 'string') {
+    // If it looks like HTML, return a generic message
+    if (payload.trimStart().startsWith('<')) {
+      return 'The API returned an error page. Check the endpoint URL.';
+    }
     return payload;
   }
 
@@ -189,7 +193,11 @@ function extractBackendErrorMessage(payload) {
   }
 
   if (typeof payload?.rawText === 'string') {
-    return payload.rawText.trim();
+    const raw = payload.rawText.trim();
+    if (raw.startsWith('<')) {
+      return 'The API returned an error page. Check the endpoint URL.';
+    }
+    return raw;
   }
 
   return '';
@@ -626,6 +634,8 @@ Use "Not found" when evidence is not present.`;
           throw error;
         }
       }
+      // Safety net: should be unreachable
+      throw new Error('Request failed after all retry attempts');
     };
 
     let requestResult = await sendRequest(structuredRequestBody, 'json_schema');
@@ -697,9 +707,13 @@ Use "Not found" when evidence is not present.`;
       throw new Error(`LLM returned JSON, but not in the expected { responses: [...] } format (${requestResult.mode} mode).`);
     }
 
-    parsedResponse.responses = prompts.map((prompt, index) => (
-      normalizeResponseRow(prompt, parsedResponse.responses[index] || {})
-    ));
+    parsedResponse.responses = prompts.map((prompt, index) => {
+      const row = parsedResponse.responses[index] || {};
+      if (index >= parsedResponse.responses.length) {
+        console.warn(`LLM returned only ${parsedResponse.responses.length} responses for ${prompts.length} prompts. Missing response for: "${prompt}"`);
+      }
+      return normalizeResponseRow(prompt, row);
+    });
 
     return parsedResponse;
   } catch (error) {

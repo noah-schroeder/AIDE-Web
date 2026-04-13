@@ -1,12 +1,13 @@
-import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
+import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import { FileText, Home, Settings, Search, BookOpen, ClipboardList, ChevronLeft, ChevronRight } from 'lucide-react';
-import StartPage from './components/StartPage';
-import SetupPage from './components/SetupPage';
-import AnalyzePage from './components/AnalyzePage';
-import CitePage from './components/CitePage';
 import './styles/App.css';
-import FinalFormPage from './components/FinalFormPage';
+
+const StartPage = lazy(() => import('./components/StartPage'));
+const SetupPage = lazy(() => import('./components/SetupPage'));
+const AnalyzePage = lazy(() => import('./components/AnalyzePage'));
+const CitePage = lazy(() => import('./components/CitePage'));
+const FinalFormPage = lazy(() => import('./components/FinalFormPage'));
 
 const NAV_ITEMS = [
   { path: '/',           label: 'Start Here',        match: 'start',      icon: Home },
@@ -26,7 +27,7 @@ function Navigation({ collapsed, setCollapsed }) {
   }, [location]);
 
   return (
-    <nav className={`sidebar${collapsed ? ' sidebar-collapsed' : ''}`}>
+    <nav className={`sidebar${collapsed ? ' sidebar-collapsed' : ''}`} aria-label="Main navigation">
       <div className="sidebar-header">
         <img src="./bird.png" alt="AIDE logo" className="logo-icon" style={{ width: 64, height: 64, objectFit: 'contain', flexShrink: 0 }}></img>        {!collapsed && <h1>AIDE</h1>}
       </div>
@@ -65,13 +66,16 @@ function App() {
       <div className={`app${collapsed ? ' sidebar-is-collapsed' : ''}`}>
         <Navigation collapsed={collapsed} setCollapsed={setCollapsed} />
         <main className="main-content">
+          <Suspense fallback={<div style={{ textAlign: 'center', padding: '2rem' }}><div className="spinner spinner-lg"></div></div>}>
           <Routes>
             <Route path="/" element={<StartPage />} />
             <Route path="/setup" element={<SetupPage />} />
             <Route path="/analyze" element={<AnalyzePage />} />
             <Route path="/final-form" element={<FinalFormPage />} />
             <Route path="/cite" element={<CitePage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </Suspense>
         </main>
       </div>
     </Router>

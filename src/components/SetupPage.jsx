@@ -3,6 +3,36 @@ import { Upload, AlertCircle, CheckCircle, Download, Eye } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
 
+function escapeHtml(str) {
+  if (typeof str !== 'string') return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+function safeSessionSet(key, value) {
+  try {
+    sessionStorage.setItem(key, value);
+    return true;
+  } catch (e) {
+    console.warn('sessionStorage write failed:', e.message);
+    return false;
+  }
+}
+
+function deduplicateHeaders(headers) {
+  const seen = {};
+  return headers.filter(Boolean).map((h) => {
+    const name = String(h);
+    if (!seen[name]) {
+      seen[name] = 1;
+      return name;
+    }
+    seen[name] += 1;
+    return `${name}_${seen[name]}`;
+  });
+}
+
+const OPEN_ROUTER_NOTE = '⚠️ OpenRouter Note: \n\nIt is highly recommended that you go into your Open Router settings and configure your account for the features you want available, particulary with respect to privacy. For example, you can choose to use only providers with zero data retention, exclude specific providers, or only include specific providers. At the present time, the model list will still show all models available, but the API request should respect your settings.';
+
 function SetupPage() {
   const [apiEndpoint, setApiEndpoint] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -13,7 +43,6 @@ function SetupPage() {
   const [codingFormFile, setCodingFormFile] = useState(null);
   const [codingFormData, setCodingFormData] = useState(null);
   const [formStatus, setFormStatus] = useState('');
-  const [openRouterNote, setOpenRouterNote] = useState('⚠️ OpenRouter Note: \n\nIt is highly recommended that you go into your Open Router settings and configure your account for the features you want available, particulary with respect to privacy. For example, you can choose to use only providers with zero data retention, exclude specific providers, or only include specific providers. At the present time, the model list will still show all models available, but the API request should respect your settings.');
 
 
   useEffect(() => {
@@ -43,6 +72,8 @@ function SetupPage() {
       return;
     }
 
+    const abortController = new AbortController();
+
     const fetchModels = async () => {
       setModelLoadingStatus('loading');
       try {
@@ -50,7 +81,7 @@ function SetupPage() {
         const staleModel = sessionStorage.getItem('aide_model');
         if (staleModel?.endsWith(':free')) {
           const cleaned = staleModel.replace(/:free$/, '');
-          sessionStorage.setItem('aide_model', cleaned);
+          safeSessionSet('aide_model', cleaned);
           setSelectedModel(cleaned);
         }
 
@@ -58,6 +89,7 @@ function SetupPage() {
         const modelsUrl = `${baseUrl}/models`;
 
         const response = await fetch(modelsUrl, {
+          signal: abortController.signal,
           headers: {
             'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json'
@@ -76,7 +108,7 @@ function SetupPage() {
           capabilitiesMap[m.id] = modalities;
         });
 
-        sessionStorage.setItem('aide_model_capabilities', JSON.stringify(capabilitiesMap));
+        safeSessionSet('aide_model_capabilities', JSON.stringify(capabilitiesMap));
 
         // Build model list with pricing info
         const models = (data.data || []).map(m => {
@@ -130,27 +162,30 @@ function SetupPage() {
     };
 
     const timer = setTimeout(fetchModels, 800);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      abortController.abort();
+    };
   }, [apiKey, apiEndpoint]);
 
   const handleEndpointChange = (e) => {
     setApiEndpoint(e.target.value);
-    sessionStorage.setItem('aide_api_endpoint', e.target.value);
+    safeSessionSet('aide_api_endpoint', e.target.value);
   };
 
   const handleApiKeyChange = (e) => {
     setApiKey(e.target.value);
-    sessionStorage.setItem('aide_api_key', e.target.value);
+    safeSessionSet('aide_api_key', e.target.value);
   };
 
   const handleContextWindowChange = (e) => {
     setContextWindow(e.target.value);
-    sessionStorage.setItem('aide_context_window', e.target.value);
+    safeSessionSet('aide_context_window', e.target.value);
   };
 
   const handleModelChange = (e) => {
     setSelectedModel(e.target.value);
-    sessionStorage.setItem('aide_model', e.target.value);
+    safeSessionSet('aide_model', e.target.value);
   };
 
   const handleFileUpload = async (event) => {
@@ -163,13 +198,20 @@ function SetupPage() {
         Papa.parse(file, {
           header: true,
           complete: (results) => {
+            const rawHeaders = results.meta.fields || [];
+            const headers = deduplicateHeaders(rawHeaders);
+            if (headers.length === 0) {
+              setFormStatus('error');
+              setTimeout(() => setFormStatus(''), 3000);
+              return;
+            }
             const formData = {
-              headers: results.meta.fields,
+              headers,
               rows: results.data,
               fileName: file.name
             };
             setCodingFormData(formData);
-            sessionStorage.setItem('aide_coding_form_data', JSON.stringify(formData));
+            safeSessionSet('aide_coding_form_data', JSON.stringify(formData));
             setCodingFormFile(file);
             setFormStatus('success');
             setTimeout(() => setFormStatus(''), 3000);
@@ -191,7 +233,13 @@ function SetupPage() {
             const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
 
             if (jsonData.length > 0) {
-              const headers = jsonData[0];
+              const rawHeaders = jsonData[0];
+              const headers = deduplicateHeaders(rawHeaders);
+              if (headers.length === 0) {
+                setFormStatus('error');
+                setTimeout(() => setFormStatus(''), 3000);
+                return;
+              }
               const rows = jsonData.slice(1).map(row => {
                 const obj = {};
                 headers.forEach((header, index) => {
@@ -202,7 +250,7 @@ function SetupPage() {
 
               const formData = { headers, rows, fileName: file.name };
               setCodingFormData(formData);
-              sessionStorage.setItem('aide_coding_form_data', JSON.stringify(formData));
+              safeSessionSet('aide_coding_form_data', JSON.stringify(formData));
               setCodingFormFile(file);
               setFormStatus('success');
               setTimeout(() => setFormStatus(''), 3000);
@@ -241,11 +289,23 @@ function SetupPage() {
       alert('Please allow popups for this site to view the coding form');
       return;
     }
+    // S1: Escape all user data to prevent XSS in the popup (same-origin access to sessionStorage)
+    const safeFileName = escapeHtml(codingFormData.fileName);
+    const safeHeaders = codingFormData.headers.map(h => escapeHtml(h));
+    const safeRows = codingFormData.rows.map(row =>
+      codingFormData.headers.map(h => escapeHtml(row[h] || ''))
+    );
+
+    // Escape JSON data for <script> block — prevent </script> injection
+    const jsonData = JSON.stringify([codingFormData.headers, ...codingFormData.rows.map(row =>
+      codingFormData.headers.map(header => row[header] || '')
+    )]).replace(/<\//g, '<\\/');
+
     const html = `
       <!DOCTYPE html>
       <html>
       <head>
-        <title>AIDE Coding Form - ${codingFormData.fileName}</title>
+        <title>AIDE Coding Form - ${safeFileName}</title>
         <style>
           body { font-family: Arial, sans-serif; padding: 20px; background-color: #f8f9fa; }
           h1 { color: #2c3e50; }
@@ -260,25 +320,23 @@ function SetupPage() {
       </head>
       <body>
         <h1>AIDE Coding Form</h1>
-        <p><strong>File:</strong> ${codingFormData.fileName}</p>
+        <p><strong>File:</strong> ${safeFileName}</p>
         <p><strong>Total Entries:</strong> ${codingFormData.rows.length}</p>
         <button class="download-btn" onclick="downloadExcel()">Download as Excel</button>
         <table>
-          <thead><tr>${codingFormData.headers.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+          <thead><tr>${safeHeaders.map(h => `<th>${h}</th>`).join('')}</tr></thead>
           <tbody>
-            ${codingFormData.rows.map(row => `
-              <tr>${codingFormData.headers.map(h => `<td>${row[h] || ''}</td>`).join('')}</tr>
+            ${safeRows.map(cells => `
+              <tr>${cells.map(c => `<td>${c}</td>`).join('')}</tr>
             `).join('')}
           </tbody>
         </table>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha512-WArB05dcHOG3KYsMnMfMBc7zWQKJUJhiXMGdv/E0VozdBTUhMuYS+nuvrYbSPNH8EXBbfsHIwbkWEbgy2bG0Q==" crossorigin="anonymous"></script>
         <script>
           function downloadExcel() {
-            const data = ${JSON.stringify([codingFormData.headers, ...codingFormData.rows.map(row =>
-              codingFormData.headers.map(header => row[header] || '')
-            )])};
-            const ws = XLSX.utils.aoa_to_sheet(data);
-            const wb = XLSX.utils.book_new();
+            var data = ${jsonData};
+            var ws = XLSX.utils.aoa_to_sheet(data);
+            var wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, 'Coding Form');
             XLSX.writeFile(wb, 'aide_coding_form_' + new Date().toISOString().split('T')[0] + '.xlsx');
           }
@@ -394,7 +452,7 @@ function SetupPage() {
               color: '#721c24',
               whiteSpace: 'pre-line',
             }}>
-              {openRouterNote}
+              {OPEN_ROUTER_NOTE}
             </div>
           )}
 

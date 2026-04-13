@@ -5,6 +5,16 @@ import CodingPrompts from './CodingPrompts';
 import { extractTextFromPDF, fileToBase64 } from '../utils/pdfUtils';
 import { callLLMAPI } from '../utils/apiUtils';
 
+function safeSessionSet(key, value) {
+  try {
+    sessionStorage.setItem(key, value);
+    return true;
+  } catch (e) {
+    console.warn('sessionStorage write failed:', e.message);
+    return false;
+  }
+}
+
 function AnalyzePage() {
   const [pdfFile, setPdfFile] = useState(null);
   const [pdfUrl, setPdfUrl] = useState(null);
@@ -17,9 +27,11 @@ function AnalyzePage() {
   const [error, setError] = useState('');
   const [apiConfig, setApiConfig] = useState(null);
   const [analysisProgress, setAnalysisProgress] = useState('');
-  
+
   const codingPromptsRef = useRef(null);
   const fileInputRef = useRef(null);
+  const latestFileRef = useRef(null);
+  const analysisAbortRef = useRef(null);
 
   useEffect(() => {
     const endpoint = sessionStorage.getItem('aide_api_endpoint');
@@ -33,7 +45,7 @@ function AnalyzePage() {
       setApiConfig({
         endpoint,
         apiKey: key,
-        contextWindow: context ? parseInt(context) : null,
+        contextWindow: context ? parseInt(context, 10) : null,
         model: model || ''
       });
     }
@@ -61,69 +73,100 @@ function AnalyzePage() {
     }
   }, []);
 
+  // Cleanup blob URL on unmount
+  useEffect(() => {
+    return () => {
+      if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+    };
+  }, [pdfUrl]);
+
   const handlePDFUpload = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
+    latestFileRef.current = file;
     setPdfFile(file);
+    // Revoke previous blob URL to prevent memory leak
+    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
     setPdfUrl(URL.createObjectURL(file));
     setError('');
-    setResponses(codingFormData?.headers.map(() => ({ response: '', source: '', page: '' })) || []);
+    setCodingFormData(prev => {
+      setResponses(prev?.headers.map(() => ({ response: '', source: '', page: '' })) || []);
+      return prev;
+    });
     try {
       const text = await extractTextFromPDF(file);
-      setPdfText(text);
+      // Only set if this is still the latest file
+      if (latestFileRef.current === file) {
+        setPdfText(text);
+      }
     } catch (err) {
       console.error('Error extracting text from PDF:', err);
-      setError('Could not extract text from PDF');
+      if (latestFileRef.current === file) {
+        setError('Could not extract text from PDF');
+      }
     }
   };
 
   const handleRecordResponse = (index, response) => {
-    if (!codingFormData) return;
-    if (codingFormData.rows.length === 0) {
-      const newRow = {};
-      codingFormData.headers.forEach((header, idx) => {
-        newRow[header] = idx === index ? response : '';
-      });
-      const updatedFormData = { ...codingFormData, rows: [newRow] };
-      setCodingFormData(updatedFormData);
-      sessionStorage.setItem('aide_coding_form_data', JSON.stringify(updatedFormData));
-      return;
-    }
-    const currentRowIndex = codingFormData.rows.length - 1;
-    const updatedRows = [...codingFormData.rows];
-    updatedRows[currentRowIndex] = {
-      ...updatedRows[currentRowIndex],
-      [codingFormData.headers[index]]: response
-    };
-    const updatedFormData = { ...codingFormData, rows: updatedRows };
-    setCodingFormData(updatedFormData);
-    sessionStorage.setItem('aide_coding_form_data', JSON.stringify(updatedFormData));
+    setCodingFormData(prev => {
+      if (!prev) return prev;
+      let updatedFormData;
+      if (prev.rows.length === 0) {
+        const newRow = {};
+        prev.headers.forEach((header, idx) => {
+          newRow[header] = idx === index ? response : '';
+        });
+        updatedFormData = { ...prev, rows: [newRow] };
+      } else {
+        const currentRowIndex = prev.rows.length - 1;
+        const updatedRows = [...prev.rows];
+        updatedRows[currentRowIndex] = {
+          ...updatedRows[currentRowIndex],
+          [prev.headers[index]]: response
+        };
+        updatedFormData = { ...prev, rows: updatedRows };
+      }
+      safeSessionSet('aide_coding_form_data', JSON.stringify(updatedFormData));
+      return updatedFormData;
+    });
   };
 
   const handleNextPDF = () => {
+    // Revoke blob URL
+    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+    // Abort any in-flight analysis
+    if (analysisAbortRef.current) {
+      analysisAbortRef.current.abort();
+      analysisAbortRef.current = null;
+    }
     setPdfFile(null);
     setPdfUrl(null);
     setPdfText('');
-    setResponses(codingFormData?.headers.map(() => ({ response: '', source: '', page: '' })) || []);
     setError('');
     setAnalysisProgress('');
+    setCodingFormData(prev => {
+      setResponses(prev?.headers.map(() => ({ response: '', source: '', page: '' })) || []);
+      if (!prev) return prev;
+      // Only append a new row if the current row has at least one non-empty value
+      const lastRow = prev.rows[prev.rows.length - 1];
+      const hasData = lastRow && prev.headers.some(h => lastRow[h] && String(lastRow[h]).trim());
+      if (!hasData) return prev;
+      const newRow = {};
+      prev.headers.forEach(header => {
+        newRow[header] = '';
+      });
+      const updatedFormData = {
+        ...prev,
+        rows: [...prev.rows, newRow]
+      };
+      safeSessionSet('aide_coding_form_data', JSON.stringify(updatedFormData));
+      return updatedFormData;
+    });
     if (codingPromptsRef.current) {
       codingPromptsRef.current.resetRecordedIndices();
     }
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
-    }
-    if (codingFormData) {
-      const newRow = {};
-      codingFormData.headers.forEach(header => {
-        newRow[header] = '';
-      });
-      const updatedFormData = {
-        ...codingFormData,
-        rows: [...codingFormData.rows, newRow]
-      };
-      setCodingFormData(updatedFormData);
-      sessionStorage.setItem('aide_coding_form_data', JSON.stringify(updatedFormData));
     }
   };
 
@@ -166,7 +209,7 @@ function AnalyzePage() {
     }
   };
 
-  const canAnalyze = pdfFile && codingFormData && apiConfig && !isAnalyzing;
+  const canAnalyze = pdfFile && codingFormData && apiConfig?.model && !isAnalyzing;
 
   const pdfCapabilityBadge = pdfModeAutoSet
     ? pdfMode === 'send-pdf'
@@ -289,25 +332,25 @@ function AnalyzePage() {
         {/* Row 2: status / alerts */}
         <div style={{ marginTop: '0.85rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {!apiConfig && (
-            <div className="alert alert-warning" style={{ marginBottom: 0 }}>
+            <div className="alert alert-warning" role="alert" style={{ marginBottom: 0 }}>
               <AlertCircle size={14} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
               Please configure your API settings on the Setup page
             </div>
           )}
           {apiConfig && !apiConfig.model && (
-            <div className="alert alert-warning" style={{ marginBottom: 0 }}>
+            <div className="alert alert-warning" role="alert" style={{ marginBottom: 0 }}>
               <AlertCircle size={14} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
               No model selected — go to Setup and pick a model
             </div>
           )}
           {!codingFormData && (
-            <div className="alert alert-warning" style={{ marginBottom: 0 }}>
+            <div className="alert alert-warning" role="alert" style={{ marginBottom: 0 }}>
               <AlertCircle size={14} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
               Please upload a coding form on the Setup page
             </div>
           )}
           {isAnalyzing && (
-            <div className="alert alert-info" style={{ marginBottom: 0 }}>
+            <div className="alert alert-info" aria-live="polite" style={{ marginBottom: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
                 <div className="spinner" />
                 {analysisProgress}
@@ -315,7 +358,7 @@ function AnalyzePage() {
             </div>
           )}
           {error && (
-            <div className="alert alert-danger" style={{ marginBottom: 0 }}>
+            <div className="alert alert-danger" role="alert" style={{ marginBottom: 0 }}>
               <AlertCircle size={14} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} />
               {error}
             </div>

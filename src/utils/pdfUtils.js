@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Set up the worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 const LINE_Y_TOLERANCE = 3;
 const COLUMN_GAP_THRESHOLD = 0.08;
@@ -119,10 +119,11 @@ function joinLinesWithParagraphs(lines) {
  * @returns {Promise<string>} - Extracted text
  */
 export async function extractTextFromPDF(file) {
+  let pdf = null;
   try {
     const arrayBuffer = await file.arrayBuffer();
     const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-    const pdf = await loadingTask.promise;
+    pdf = await loadingTask.promise;
     const numPages = pdf.numPages;
 
     let fullText = '';
@@ -139,6 +140,8 @@ export async function extractTextFromPDF(file) {
   } catch (error) {
     console.error('Error extracting text from PDF:', error);
     throw new Error('Failed to extract text from PDF');
+  } finally {
+    if (pdf) pdf.destroy();
   }
 }
 
@@ -162,13 +165,16 @@ export function fileToBase64(file) {
  * @returns {Promise<number>} - Number of pages
  */
 export async function getPDFPageCount(file) {
+  let pdf = null;
   try {
     const arrayBuffer = await file.arrayBuffer();
     const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-    const pdf = await loadingTask.promise;
+    pdf = await loadingTask.promise;
     return pdf.numPages;
   } catch (error) {
     console.error('Error getting PDF page count:', error);
     throw new Error('Failed to read PDF');
+  } finally {
+    if (pdf) pdf.destroy();
   }
 }
