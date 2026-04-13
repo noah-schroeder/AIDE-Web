@@ -4,10 +4,10 @@ const RESPONSE_SHAPE_GUIDANCE = `Return valid JSON only with this exact shape:
 {
   "responses": [
     {
-      "prompt": "<prompt text>",
-      "response": "<answer or Not found>",
-      "source": "<supporting quote or Not found>",
-      "page": "<page number or N/A>"
+      "prompt": "<coding form field>",
+      "response": "<extracted answer or Not found>",
+      "source": "<verbatim quote from the document supporting your answer, or Not found>",
+      "page": "<page number where found, or N/A>"
     }
   ]
 }
@@ -512,10 +512,21 @@ export async function callLLMAPI(endpoint, apiKey, model, prompts, content, cont
       }
     }
 
-    const systemMessage = `You are a data extraction assistant for systematic reviews and meta-analysis.
-Extract the requested information from the provided document.
-Be accurate and concise.
-Use "Not found" when evidence is not present.`;
+    const systemMessage = `You are a research data extraction assistant. Your task is to help researchers conduct systematic reviews and meta-analyses by extracting structured data from academic articles.
+
+You will receive an academic document (research paper, journal article, or similar scholarly work) and a set of coding form fields. Each field is a question or data point that the researcher needs extracted from the document.
+
+Instructions:
+- Read the document carefully and answer each coding form field based solely on the document content.
+- Be accurate, concise, and faithful to the source material.
+- For each field, provide a direct verbatim quote from the document as supporting evidence.
+- Identify the specific page number where the information was found.
+- If a piece of information is not present in the document, respond with "Not found" — do not guess or infer beyond what is stated.`;
+
+    const fieldGuidance = `For each coding form field, return:
+- "response": Your concise answer extracted from the document.
+- "source": A direct verbatim quote from the document that supports your answer. This must be actual text from the document — never a file name, file identifier, reference ID, or metadata.
+- "page": The page number where this information appears (e.g. "1", "3", "12"). If it spans pages, return the first page. Use the page numbers as they appear in the document.`;
 
     let documentSection = '';
     let userContent;
@@ -529,10 +540,10 @@ Use "Not found" when evidence is not present.`;
       .map((prompt, index) => `${index + 1}. ${prompt}`)
       .join('\n');
 
-    const promptSection = `${documentSection}Prompts to answer:\n${promptList}\n\nPlease extract the requested information and return it as a JSON object with the format specified.`;
+    const promptSection = `${documentSection}${fieldGuidance}\n\nCoding form fields to extract:\n${promptList}\n\nExtract the requested data and return it as a JSON object with the format specified.`;
 
     if (content.type === 'pdf' && content.data) {
-      userContent = [
+      const pdfTextParts = [
         {
           type: 'file',
           file: {
@@ -542,9 +553,20 @@ Use "Not found" when evidence is not present.`;
         },
         {
           type: 'text',
-          text: `Prompts to answer:\n${promptList}\n\nPlease extract the requested information and return it as a JSON object with the format specified.`
+          text: `${fieldGuidance}\n\nCoding form fields to extract:\n${promptList}\n\nExtract the requested data and return it as a JSON object with the format specified. Remember: "source" must be a direct quote from the document text, never a file name or reference.`
         }
       ];
+
+      // If we have extracted text with page markers, include a compact page index
+      // so the model can cross-reference content locations with exact page numbers
+      if (content.textFallback) {
+        pdfTextParts.push({
+          type: 'text',
+          text: `Page reference index (use this to determine accurate page numbers):\n${content.textFallback}`
+        });
+      }
+
+      userContent = pdfTextParts;
     } else {
       userContent = promptSection;
     }
@@ -558,7 +580,7 @@ Use "Not found" when evidence is not present.`;
 
     // For prompt-only fallback, PDF binary can't be embedded — use text fallback
     const promptOnlyTextContent = content.type === 'pdf' && content.textFallback
-      ? `Document Text:\n${content.textFallback}\n\nPrompts to answer:\n${promptList}\n\nPlease extract the requested information and return it as a JSON object with the format specified.`
+      ? `Document Text:\n${content.textFallback}\n\n${fieldGuidance}\n\nCoding form fields to extract:\n${promptList}\n\nExtract the requested data and return it as a JSON object with the format specified.`
       : baseUserMessage;
 
     const promptOnlyMessages = [
