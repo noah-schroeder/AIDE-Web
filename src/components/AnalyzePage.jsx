@@ -2,11 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Play, FileText, AlertCircle, SkipForward, Cpu, CheckCircle, Info } from 'lucide-react';
 import PDFViewer from './PDFViewer';
 import CodingPrompts from './CodingPrompts';
-<<<<<<< HEAD
-import { extractTextFromPDF, pdfToBase64 } from '../utils/pdfUtils';
-=======
 import { extractTextFromPDF, fileToBase64 } from '../utils/pdfUtils';
->>>>>>> a8257aa303d24394daa0e87bd30791dfda8fa7e0
 import { callLLMAPI } from '../utils/apiUtils';
 
 function safeSessionSet(key, value) {
@@ -31,12 +27,8 @@ function AnalyzePage() {
   const [error, setError] = useState('');
   const [apiConfig, setApiConfig] = useState(null);
   const [analysisProgress, setAnalysisProgress] = useState('');
-<<<<<<< HEAD
   const [isExtractingPdfText, setIsExtractingPdfText] = useState(false);
-  
-=======
 
->>>>>>> a8257aa303d24394daa0e87bd30791dfda8fa7e0
   const codingPromptsRef = useRef(null);
   const fileInputRef = useRef(null);
   const latestFileRef = useRef(null);
@@ -99,15 +91,11 @@ function AnalyzePage() {
     setPdfUrl(URL.createObjectURL(file));
     setPdfText('');
     setError('');
-<<<<<<< HEAD
-    setResponses(codingFormData?.headers.map(() => ({ response: '', source: '', page: '' })) || []);
-    setIsExtractingPdfText(true);
-=======
     setCodingFormData(prev => {
       setResponses(prev?.headers.map(() => ({ response: '', source: '', page: '' })) || []);
       return prev;
     });
->>>>>>> a8257aa303d24394daa0e87bd30791dfda8fa7e0
+    setIsExtractingPdfText(true);
     try {
       const text = await extractTextFromPDF(file);
       // Only set if this is still the latest file
@@ -116,15 +104,13 @@ function AnalyzePage() {
       }
     } catch (err) {
       console.error('Error extracting text from PDF:', err);
-<<<<<<< HEAD
-      setError('Could not extract text from PDF. PDF file mode can still work if the selected model supports PDF input.');
-    } finally {
-      setIsExtractingPdfText(false);
-=======
       if (latestFileRef.current === file) {
-        setError('Could not extract text from PDF');
+        setError('Could not extract text from PDF. PDF file mode can still work if the selected model supports PDF input.');
       }
->>>>>>> a8257aa303d24394daa0e87bd30791dfda8fa7e0
+    } finally {
+      if (latestFileRef.current === file) {
+        setIsExtractingPdfText(false);
+      }
     }
   };
 
@@ -207,24 +193,20 @@ function AnalyzePage() {
     setIsAnalyzing(true);
     setError('');
     setAnalysisProgress('Preparing request...');
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
     try {
       const prompts = codingFormData.headers;
       let content;
       if (pdfMode === 'send-pdf') {
-<<<<<<< HEAD
         setAnalysisProgress('Encoding PDF file...');
-        const base64PDF = await pdfToBase64(pdfFile);
+        const base64PDF = await fileToBase64(pdfFile);
         content = {
           type: 'pdf',
           data: base64PDF,
           fileName: pdfFile.name,
           textFallback: pdfText
         };
-=======
-        setAnalysisProgress('Converting PDF to base64...');
-        const base64PDF = await fileToBase64(pdfFile);
-        content = { type: 'pdf', data: base64PDF, fileName: pdfFile.name, textFallback: pdfText };
->>>>>>> a8257aa303d24394daa0e87bd30791dfda8fa7e0
       } else {
         content = { type: 'text', data: pdfText };
       }
@@ -236,7 +218,8 @@ function AnalyzePage() {
         prompts,
         content,
         apiConfig.contextWindow,
-        (msg) => setAnalysisProgress(msg)
+        (msg) => setAnalysisProgress(msg),
+        controller.signal
       );
       setAnalysisProgress('Processing results...');
       setResponses(result.responses);
@@ -245,14 +228,13 @@ function AnalyzePage() {
       setError(err.message || 'An error occurred during analysis');
     } finally {
       setIsAnalyzing(false);
+      if (analysisAbortRef.current === controller) {
+        analysisAbortRef.current = null;
+      }
     }
   };
 
-<<<<<<< HEAD
-  const canAnalyze = pdfFile && codingFormData && apiConfig && !isAnalyzing && !isExtractingPdfText;
-=======
-  const canAnalyze = pdfFile && codingFormData && apiConfig?.model && !isAnalyzing;
->>>>>>> a8257aa303d24394daa0e87bd30791dfda8fa7e0
+  const canAnalyze = pdfFile && codingFormData && apiConfig?.model && !isAnalyzing && !isExtractingPdfText;
 
   const pdfCapabilityBadge = pdfModeAutoSet
     ? pdfMode === 'send-pdf'
