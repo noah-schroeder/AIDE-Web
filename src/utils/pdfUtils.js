@@ -47,20 +47,3 @@ export async function pdfToBase64(file) {
     reader.readAsDataURL(file);
   });
 }
-
-/**
- * Get page count from PDF
- * @param {File} file - PDF file
- * @returns {Promise<number>} - Number of pages
- */
-export async function getPDFPageCount(file) {
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-    const pdf = await loadingTask.promise;
-    return pdf.numPages;
-  } catch (error) {
-    console.error('Error getting PDF page count:', error);
-    throw new Error('Failed to read PDF');
-  }
-}

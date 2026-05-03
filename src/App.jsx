@@ -16,6 +16,8 @@ const NAV_ITEMS = [
   { path: '/cite',       label: 'Cite',               match: 'cite',       icon: BookOpen },
 ];
 
+const logoUrl = `${import.meta.env.BASE_URL}bird.png`;
+
 function Navigation({ collapsed, setCollapsed }) {
   const location = useLocation();
   const [activeTab, setActiveTab] = useState('start');
@@ -28,7 +30,8 @@ function Navigation({ collapsed, setCollapsed }) {
   return (
     <nav className={`sidebar${collapsed ? ' sidebar-collapsed' : ''}`}>
       <div className="sidebar-header">
-        <img src="./bird.png" alt="AIDE logo" className="logo-icon" style={{ width: 64, height: 64, objectFit: 'contain', flexShrink: 0 }}></img>        {!collapsed && <h1>AIDE</h1>}
+        <img src={logoUrl} alt="AIDE logo" className="logo-icon" style={{ width: 64, height: 64, objectFit: 'contain', flexShrink: 0 }}></img>
+        {!collapsed && <h1>AIDE</h1>}
       </div>
 
       <ul className="nav-menu">

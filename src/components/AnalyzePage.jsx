@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Play, FileText, AlertCircle, SkipForward, Cpu, CheckCircle, Info } from 'lucide-react';
 import PDFViewer from './PDFViewer';
 import CodingPrompts from './CodingPrompts';
-import { extractTextFromPDF } from '../utils/pdfUtils';
+import { extractTextFromPDF, pdfToBase64 } from '../utils/pdfUtils';
 import { callLLMAPI } from '../utils/apiUtils';
 
 function AnalyzePage() {
@@ -17,6 +17,7 @@ function AnalyzePage() {
   const [error, setError] = useState('');
   const [apiConfig, setApiConfig] = useState(null);
   const [analysisProgress, setAnalysisProgress] = useState('');
+  const [isExtractingPdfText, setIsExtractingPdfText] = useState(false);
   
   const codingPromptsRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -66,14 +67,18 @@ function AnalyzePage() {
     if (!file) return;
     setPdfFile(file);
     setPdfUrl(URL.createObjectURL(file));
+    setPdfText('');
     setError('');
     setResponses(codingFormData?.headers.map(() => ({ response: '', source: '', page: '' })) || []);
+    setIsExtractingPdfText(true);
     try {
       const text = await extractTextFromPDF(file);
       setPdfText(text);
     } catch (err) {
       console.error('Error extracting text from PDF:', err);
-      setError('Could not extract text from PDF');
+      setError('Could not extract text from PDF. PDF file mode can still work if the selected model supports PDF input.');
+    } finally {
+      setIsExtractingPdfText(false);
     }
   };
 
@@ -132,6 +137,14 @@ function AnalyzePage() {
       setError('Please upload a PDF, configure API settings, and upload a coding form first');
       return;
     }
+    if (isExtractingPdfText) {
+      setError('Please wait for PDF text extraction to finish');
+      return;
+    }
+    if (pdfMode === 'text-only' && !pdfText.trim()) {
+      setError('Text-only mode requires extractable text from the PDF. Try "Send PDF file" with a PDF-capable model.');
+      return;
+    }
     setIsAnalyzing(true);
     setError('');
     setAnalysisProgress('Preparing request...');
@@ -139,11 +152,15 @@ function AnalyzePage() {
       const prompts = codingFormData.headers;
       let content;
       if (pdfMode === 'send-pdf') {
-        setAnalysisProgress('Converting PDF to base64...');
-        const base64PDF = await fileToBase64(pdfFile);
-        content = { type: 'pdf', data: base64PDF, fileName: pdfFile.name };
+        setAnalysisProgress('Encoding PDF file...');
+        const base64PDF = await pdfToBase64(pdfFile);
+        content = {
+          type: 'pdf',
+          data: base64PDF,
+          fileName: pdfFile.name,
+          textFallback: pdfText
+        };
       } else {
-        setAnalysisProgress('Extracting text from PDF...');
         content = { type: 'text', data: pdfText };
       }
       setAnalysisProgress('Sending request to LLM...');
@@ -165,14 +182,7 @@ function AnalyzePage() {
     }
   };
 
-  const fileToBase64 = (file) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(',')[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-
-  const canAnalyze = pdfFile && codingFormData && apiConfig && !isAnalyzing;
+  const canAnalyze = pdfFile && codingFormData && apiConfig && !isAnalyzing && !isExtractingPdfText;
 
   const pdfCapabilityBadge = pdfModeAutoSet
     ? pdfMode === 'send-pdf'
@@ -317,6 +327,14 @@ function AnalyzePage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
                 <div className="spinner" />
                 {analysisProgress}
+              </div>
+            </div>
+          )}
+          {isExtractingPdfText && !isAnalyzing && (
+            <div className="alert alert-info" style={{ marginBottom: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <div className="spinner" />
+                Extracting PDF text...
               </div>
             </div>
           )}
