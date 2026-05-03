@@ -144,13 +144,6 @@ function buildMessages(prompts, content) {
   ];
 }
 
-function isPdfInputUnsupportedError(message) {
-  return (
-    /(pdf|file|document|multimodal|media|file_data|file_id|content array)[\s\S]*(unsupported|unknown|unrecognized|not supported|invalid|extra inputs?|forbidden)/i.test(message) ||
-    /(unsupported|unknown|unrecognized|not supported|invalid|extra inputs?|forbidden)[\s\S]*(pdf|file|document|multimodal|media|file_data|file_id|content array)/i.test(message)
-  );
-}
-
 function isThinkingModel(model) {
   return /thinking/i.test(String(model || ''));
 }
@@ -884,6 +877,22 @@ function parseStructuredResponse(data, prompts, responseMode) {
       bestResponseScore = candidateScore;
     }
   });
+
+  // Truncated JSON recovery: if the full JSON was cut off, findBalancedJsonSnippets returns
+  // individual item objects instead of the wrapping {"responses":[...]} array. Assemble them.
+  if (!parsedResponse && candidates.length > 0) {
+    const itemCandidates = candidates.filter((c) => isResponseLikeEntry(c));
+    if (itemCandidates.length > 0) {
+      const assembled = normalizeResponsePayload(itemCandidates, prompts);
+      if (assembled) {
+        const assembledValidation = validateExtractionSchema(assembled, prompts);
+        if (assembledValidation.valid) {
+          parsedResponse = enforcePromptOrder(assembled, prompts);
+          bestResponseScore = scoreResponse(parsedResponse);
+        }
+      }
+    }
+  }
 
   if (!parsedResponse) {
     console.error('Failed to parse or validate structured LLM output.', {
