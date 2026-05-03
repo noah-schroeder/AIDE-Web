@@ -40,7 +40,7 @@ function createResponseSchema(promptCount) {
     properties: {
       responses: {
         type: 'array',
-        minItems: promptCount,
+        minItems: 1,
         maxItems: promptCount,
         items: {
           type: 'object',
@@ -93,37 +93,30 @@ ${promptList}
 ${RESPONSE_SHAPE_GUIDANCE}`;
 }
 
-function toPdfDataUrl(base64PDF) {
-  const value = String(base64PDF || '').trim();
-
-  if (!value) {
-    return '';
-  }
-
-  if (value.startsWith('data:')) {
-    return value;
-  }
-
-  return `data:application/pdf;base64,${value}`;
+function extractBase64(value) {
+  const str = String(value || '').trim();
+  const match = str.match(/^data:[^;]+;base64,(.+)$/);
+  return match ? match[1] : str;
 }
 
 function buildMessages(prompts, content) {
   const promptText = buildPromptText(prompts, content);
 
   if (content.type === 'pdf') {
-    const fileData = toPdfDataUrl(content.data);
+    const base64Data = extractBase64(content.data);
 
-    if (!fileData) {
+    if (!base64Data) {
       throw new Error('PDF mode requires a base64-encoded PDF file.');
     }
 
     const contentBlocks = [
       { type: 'text', text: promptText },
       {
-        type: 'file',
-        file: {
-          file_data: fileData,
-          format: 'application/pdf'
+        type: 'document',
+        source: {
+          type: 'base64',
+          media_type: 'application/pdf',
+          data: base64Data
         }
       }
     ];
@@ -151,7 +144,18 @@ function buildMessages(prompts, content) {
   ];
 }
 
-function createRequestBody({ model, messages, responseSchema, responseMode, contextWindow, includeThinkingDisabled }) {
+function isPdfInputUnsupportedError(message) {
+  return (
+    /(pdf|file|document|multimodal|media|file_data|file_id|content array)[\s\S]*(unsupported|unknown|unrecognized|not supported|invalid|extra inputs?|forbidden)/i.test(message) ||
+    /(unsupported|unknown|unrecognized|not supported|invalid|extra inputs?|forbidden)[\s\S]*(pdf|file|document|multimodal|media|file_data|file_id|content array)/i.test(message)
+  );
+}
+
+function isThinkingModel(model) {
+  return /thinking/i.test(String(model || ''));
+}
+
+function createRequestBody({ model, messages, responseSchema, responseMode, contextWindow, omitThinking = false }) {
   const body = {
     model,
     messages,
@@ -168,11 +172,10 @@ function createRequestBody({ model, messages, responseSchema, responseMode, cont
       : { type: 'json_object' }
   };
 
-  if (includeThinkingDisabled) {
-    body.thinking = { type: 'disabled' };
-  }
-
-  if (contextWindow) {
+  if (!omitThinking && isThinkingModel(model)) {
+    body.thinking = { type: 'enabled', budget_tokens: 8000 };
+    body.max_tokens = 16000;
+  } else if (contextWindow) {
     body.max_tokens = contextWindow;
   }
 
@@ -339,27 +342,19 @@ function isPdfInputUnsupportedError(message) {
 }
 
 async function sendCompletionMode({ endpoint, apiKey, model, messages, responseSchema, responseMode, contextWindow, abortSignal }) {
-  const body = createRequestBody({
-    model,
-    messages,
-    responseSchema,
-    responseMode,
-    contextWindow,
-    includeThinkingDisabled: true
-  });
-
+  const body = createRequestBody({ model, messages, responseSchema, responseMode, contextWindow });
   const result = await sendRequest(endpoint, apiKey, body, abortSignal);
   const message = getErrorMessage(result.payload);
 
   if (result.response.status === 400 && isThinkingParamUnsupportedError(message)) {
-    console.warn('Thinking disable parameter unsupported. Retrying without thinking override.');
+    console.warn('Thinking parameter unsupported for this route. Retrying without thinking.');
     const retryBody = createRequestBody({
       model,
       messages,
       responseSchema,
       responseMode,
       contextWindow,
-      includeThinkingDisabled: false
+      omitThinking: true
     });
     return sendRequest(endpoint, apiKey, retryBody, abortSignal);
   }
@@ -410,7 +405,7 @@ async function sendWithPdfFallback(requestConfig, content, responseMode) {
 
 function messageContentToText(value) {
   if (typeof value === 'string') {
-    return value;
+    return value.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '').trim();
   }
 
   if (Array.isArray(value)) {
