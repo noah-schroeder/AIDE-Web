@@ -33,11 +33,21 @@ function FinalFormPage() {
 
   const handleDownloadCSV = () => {
     if (!codingFormData) return;
+
+    // Sanitize cell values to prevent CSV injection
+    const sanitizeCSVValue = (val) => {
+      const s = String(val || '');
+      if (s.length > 0 && '=+-@'.includes(s[0])) {
+        return "'" + s;
+      }
+      return s;
+    };
+
     const rows = [
       codingFormData.headers,
       ...codingFormData.rows.map(row =>
         codingFormData.headers.map(header => {
-          const val = String(row[header] || '');
+          const val = sanitizeCSVValue(row[header]);
           return val.includes(',') || val.includes('"') || val.includes('\n')
             ? `"${val.replace(/"/g, '""')}"`
             : val;

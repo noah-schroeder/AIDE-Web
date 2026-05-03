@@ -1,9 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { ZoomIn, ZoomOut, ExternalLink } from 'lucide-react';
+import { ZoomIn, ZoomOut, ExternalLink, ChevronLeft, ChevronRight } from 'lucide-react';
 
-// Set up the worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+// Worker is configured in pdfUtils.js (imported by AnalyzePage before this component renders)
 
 // Render once at a high resolution; zoom is handled purely via CSS width
 const BASE_SCALE = 2.0;
@@ -11,52 +10,46 @@ const ZOOM_STEP = 0.15;
 const ZOOM_MIN = 0.3;
 const ZOOM_MAX = 2.5;
 const ZOOM_DEFAULT = 1.0; // 1.0 = 100% of the container width
+const PAGES_PER_VIEW = 3; // Render only a few pages at a time
 
 function PDFViewer({ pdfUrl, highlightPage }) {
   const [pages, setPages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [zoom, setZoom] = useState(ZOOM_DEFAULT);
+  const [numPages, setNumPages] = useState(0);
+  const [currentStartPage, setCurrentStartPage] = useState(1);
+  const pdfDocRef = useRef(null);
 
   useEffect(() => {
     if (!pdfUrl) return;
 
+    let cancelled = false;
     setLoading(true);
     setError(null);
     setPages([]);
     setZoom(ZOOM_DEFAULT);
+    setCurrentStartPage(1);
+
+    let loadingTask = null;
 
     const loadPDF = async () => {
       try {
-        const loadingTask = pdfjsLib.getDocument(pdfUrl);
+        loadingTask = pdfjsLib.getDocument(pdfUrl);
         const pdf = await loadingTask.promise;
-        const numPages = pdf.numPages;
-        const pagePromises = [];
-
-        for (let i = 1; i <= numPages; i++) {
-          pagePromises.push(
-            pdf.getPage(i).then(page => {
-              const viewport = page.getViewport({ scale: BASE_SCALE });
-              const canvas = document.createElement('canvas');
-              const context = canvas.getContext('2d');
-              canvas.height = viewport.height;
-              canvas.width = viewport.width;
-
-              return page.render({
-                canvasContext: context,
-                viewport: viewport
-              }).promise.then(() => ({
-                pageNumber: i,
-                dataUrl: canvas.toDataURL()
-              }));
-            })
-          );
+        if (cancelled) {
+          pdf.destroy();
+          return;
         }
-
-        const renderedPages = await Promise.all(pagePromises);
-        setPages(renderedPages);
+        // Destroy previous document
+        if (pdfDocRef.current) {
+          pdfDocRef.current.destroy();
+        }
+        pdfDocRef.current = pdf;
+        setNumPages(pdf.numPages);
         setLoading(false);
       } catch (err) {
+        if (cancelled) return;
         console.error('Error loading PDF:', err);
         setError('Failed to load PDF');
         setLoading(false);
@@ -64,7 +57,72 @@ function PDFViewer({ pdfUrl, highlightPage }) {
     };
 
     loadPDF();
+
+    return () => {
+      cancelled = true;
+      if (loadingTask) {
+        loadingTask.destroy();
+      }
+    };
   }, [pdfUrl]);
+
+  // Render visible pages when currentStartPage or pdf changes
+  useEffect(() => {
+    const pdf = pdfDocRef.current;
+    if (!pdf || numPages === 0) return;
+
+    let cancelled = false;
+    const endPage = Math.min(currentStartPage + PAGES_PER_VIEW - 1, numPages);
+
+    const renderPages = async () => {
+      const renderedPages = [];
+      for (let i = currentStartPage; i <= endPage; i++) {
+        if (cancelled) return;
+        try {
+          const page = await pdf.getPage(i);
+          if (cancelled) return;
+          const viewport = page.getViewport({ scale: BASE_SCALE });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
+
+          await page.render({
+            canvasContext: context,
+            viewport: viewport
+          }).promise;
+
+          if (cancelled) return;
+          renderedPages.push({
+            pageNumber: i,
+            dataUrl: canvas.toDataURL()
+          });
+        } catch (err) {
+          if (cancelled) return;
+          console.error(`Error rendering page ${i}:`, err);
+        }
+      }
+      if (!cancelled) {
+        setPages(renderedPages);
+      }
+    };
+
+    renderPages();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentStartPage, numPages]);
+
+  // Cleanup pdf document on unmount
+  useEffect(() => {
+    return () => {
+      if (pdfDocRef.current) {
+        pdfDocRef.current.destroy();
+        pdfDocRef.current = null;
+      }
+    };
+  }, []);
 
   const handleZoomIn = () => setZoom(prev => Math.min(parseFloat((prev + ZOOM_STEP).toFixed(2)), ZOOM_MAX));
   const handleZoomOut = () => setZoom(prev => Math.max(parseFloat((prev - ZOOM_STEP).toFixed(2)), ZOOM_MIN));
@@ -73,6 +131,18 @@ function PDFViewer({ pdfUrl, highlightPage }) {
     if (pdfUrl) {
       window.open(pdfUrl, '_blank', 'noopener,noreferrer');
     }
+  };
+
+  const endPage = Math.min(currentStartPage + PAGES_PER_VIEW - 1, numPages);
+  const canGoPrev = currentStartPage > 1;
+  const canGoNext = endPage < numPages;
+
+  const handlePrevPages = () => {
+    setCurrentStartPage(prev => Math.max(1, prev - PAGES_PER_VIEW));
+  };
+
+  const handleNextPages = () => {
+    setCurrentStartPage(prev => Math.min(prev + PAGES_PER_VIEW, numPages));
   };
 
   if (loading) {
@@ -135,7 +205,32 @@ function PDFViewer({ pdfUrl, highlightPage }) {
         </div>
       </div>
 
-      {/* Scrollable viewer — overflow-x allows panning when zoomed in */}
+      {/* Page navigation */}
+      {numPages > PAGES_PER_VIEW && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.75rem', marginBottom: '0.75rem' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={handlePrevPages}
+            disabled={!canGoPrev}
+            style={{ padding: '0.25rem 0.5rem' }}
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <span style={{ fontSize: '0.875rem', color: '#495057' }}>
+            Pages {currentStartPage}–{endPage} of {numPages}
+          </span>
+          <button
+            className="btn btn-secondary"
+            onClick={handleNextPages}
+            disabled={!canGoNext}
+            style={{ padding: '0.25rem 0.5rem' }}
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      )}
+
+      {/* Scrollable viewer */}
       <div style={{
         maxHeight: '75vh',
         overflowY: 'auto',
@@ -154,7 +249,6 @@ function PDFViewer({ pdfUrl, highlightPage }) {
               border: highlightPage === page.pageNumber ? '3px solid #ffc107' : 'none',
               borderRadius: '4px',
               overflow: 'hidden',
-              /* zoom is applied as a percentage of the container width */
               width: `${zoom * 100}%`
             }}
           >
