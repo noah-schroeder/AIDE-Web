@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
 import * as pdfjsLib from 'pdfjs-dist';
 import { ZoomIn, ZoomOut, ExternalLink, ChevronLeft, ChevronRight } from 'lucide-react';
+import { locateQuoteRects, parseTargetPage } from '../utils/pdfUtils';
 
 // Worker is configured in pdfUtils.js (imported by AnalyzePage before this component renders)
 
@@ -12,14 +14,20 @@ const ZOOM_MAX = 2.5;
 const ZOOM_DEFAULT = 1.0; // 1.0 = 100% of the container width
 const PAGES_PER_VIEW = 3; // Render only a few pages at a time
 
-function PDFViewer({ pdfUrl, highlightPage }) {
+function PDFViewer({ pdfUrl, sourceTarget, isPopup = false }) {
   const [pages, setPages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [zoom, setZoom] = useState(ZOOM_DEFAULT);
   const [numPages, setNumPages] = useState(0);
   const [currentStartPage, setCurrentStartPage] = useState(1);
+  const [overlay, setOverlay] = useState(null); // { pageNumber, rects, nonce }
+  const [pendingScroll, setPendingScroll] = useState(null); // { page, nonce }
   const pdfDocRef = useRef(null);
+  const viewerScrollRef = useRef(null);
+  // Refs for the detached "open in new window" viewer (only used when !isPopup)
+  const popupWindowRef = useRef(null);
+  const popupRootRef = useRef(null);
 
   useEffect(() => {
     if (!pdfUrl) return;
@@ -30,12 +38,15 @@ function PDFViewer({ pdfUrl, highlightPage }) {
     setPages([]);
     setZoom(ZOOM_DEFAULT);
     setCurrentStartPage(1);
+    setOverlay(null);
+    setPendingScroll(null);
 
     let loadingTask = null;
 
     const loadPDF = async () => {
       try {
-        loadingTask = pdfjsLib.getDocument(pdfUrl);
+        // isEvalSupported: false keeps pdf.js within a strict CSP (no 'unsafe-eval').
+        loadingTask = pdfjsLib.getDocument({ url: pdfUrl, isEvalSupported: false });
         const pdf = await loadingTask.promise;
         if (cancelled) {
           pdf.destroy();
@@ -124,18 +135,118 @@ function PDFViewer({ pdfUrl, highlightPage }) {
     };
   }, []);
 
+  // Jump to the referenced page and compute the source bounding boxes when a
+  // Source button is clicked. The nonce on sourceTarget makes re-clicks re-fire.
+  useEffect(() => {
+    const pdf = pdfDocRef.current;
+    if (!sourceTarget || numPages === 0 || !pdf) return;
+
+    const { page: pageStr, quote, nonce } = sourceTarget;
+    const targetPage = parseTargetPage(pageStr, numPages);
+    if (!targetPage) {
+      setOverlay(null);
+      return;
+    }
+
+    // Bring the chunk containing the target page into view, then scroll to it.
+    const chunkStart = 1 + Math.floor((targetPage - 1) / PAGES_PER_VIEW) * PAGES_PER_VIEW;
+    setCurrentStartPage(chunkStart);
+    setPendingScroll({ page: targetPage, nonce });
+
+    // Locate the quote independently of what's currently rendered.
+    let cancelled = false;
+    (async () => {
+      try {
+        const page = await pdf.getPage(targetPage);
+        const rects = await locateQuoteRects(page, quote);
+        if (!cancelled) setOverlay({ pageNumber: targetPage, rects, nonce });
+      } catch (err) {
+        console.error('Error locating source on page:', err);
+        if (!cancelled) setOverlay({ pageNumber: targetPage, rects: [], nonce });
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [sourceTarget, numPages]);
+
+  // Scroll the pending target page into view once its element has rendered.
+  // Scoped to this viewer's container (via ref, not document.getElementById) so it
+  // works correctly when a second instance is rendered into a popup window.
+  useEffect(() => {
+    if (!pendingScroll) return;
+    const el = viewerScrollRef.current?.querySelector(`#pdf-page-${pendingScroll.page}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setPendingScroll(null);
+    }
+  }, [pages, pendingScroll]);
+
+  // Keep the detached "open in new window" viewer in sync with the current
+  // source/PDF, so clicking a different Source also re-highlights it there.
+  useEffect(() => {
+    if (isPopup) return;
+    const win = popupWindowRef.current;
+    if (win && !win.closed && popupRootRef.current) {
+      popupRootRef.current.render(
+        <PDFViewer pdfUrl={pdfUrl} sourceTarget={sourceTarget} isPopup />
+      );
+    }
+  }, [pdfUrl, sourceTarget, isPopup]);
+
+  // Tear down the popup viewer when this component unmounts.
+  useEffect(() => {
+    return () => {
+      const root = popupRootRef.current;
+      const win = popupWindowRef.current;
+      popupRootRef.current = null;
+      popupWindowRef.current = null;
+      // Defer unmount so we don't unmount one root during another's render.
+      if (root) setTimeout(() => { try { root.unmount(); } catch (e) { /* window gone */ } }, 0);
+      if (win && !win.closed) win.close();
+    };
+  }, []);
+
   const handleZoomIn = () => setZoom(prev => Math.min(parseFloat((prev + ZOOM_STEP).toFixed(2)), ZOOM_MAX));
   const handleZoomOut = () => setZoom(prev => Math.max(parseFloat((prev - ZOOM_STEP).toFixed(2)), ZOOM_MIN));
 
+  // Open (or reuse) a popup window and render a full PDFViewer into it, so the
+  // bounding-box highlight is available in the detached window too. All JS runs
+  // in this (opener) realm; only the DOM lives in the popup.
   const handleOpenInNewWindow = () => {
-    if (pdfUrl) {
-      window.open(pdfUrl, '_blank', 'noopener,noreferrer');
+    if (!pdfUrl) return;
+    let win = popupWindowRef.current;
+    if (!win || win.closed) {
+      win = window.open('', 'aide-pdf-popup', 'width=900,height=1000,scrollbars=yes,resizable=yes');
+      if (!win) return; // blocked by popup blocker
+      popupWindowRef.current = win;
+      win.document.title = 'AIDE — PDF Preview';
+      win.document.body.style.margin = '0';
+      win.document.body.style.background = '#f8f9fa';
+      // Base href so relative stylesheet/asset URLs resolve against the app origin.
+      const base = win.document.createElement('base');
+      base.href = window.location.href;
+      win.document.head.appendChild(base);
+      // Clone the app's stylesheets so the viewer looks the same in the popup.
+      document.querySelectorAll('style, link[rel="stylesheet"]').forEach((node) => {
+        win.document.head.appendChild(node.cloneNode(true));
+      });
+      const container = win.document.createElement('div');
+      container.style.padding = '0.75rem';
+      win.document.body.appendChild(container);
+      popupRootRef.current = createRoot(container);
     }
+    popupRootRef.current.render(
+      <PDFViewer pdfUrl={pdfUrl} sourceTarget={sourceTarget} isPopup />
+    );
+    win.focus();
   };
 
   const endPage = Math.min(currentStartPage + PAGES_PER_VIEW - 1, numPages);
   const canGoPrev = currentStartPage > 1;
   const canGoNext = endPage < numPages;
+
+  // When the source quote couldn't be located, fall back to highlighting the whole page.
+  const fallbackHighlightPage = overlay && overlay.rects.length === 0 ? overlay.pageNumber : null;
 
   const handlePrevPages = () => {
     setCurrentStartPage(prev => Math.max(1, prev - PAGES_PER_VIEW));
@@ -193,15 +304,17 @@ function PDFViewer({ pdfUrl, highlightPage }) {
           >
             <ZoomIn size={16} />
           </button>
-          <button
-            className="btn btn-secondary"
-            onClick={handleOpenInNewWindow}
-            title="Open PDF in new window"
-            style={{ padding: '0.25rem 0.5rem', marginLeft: '0.25rem' }}
-          >
-            <ExternalLink size={16} style={{ marginRight: '0.25rem', verticalAlign: 'middle' }} />
-            Open
-          </button>
+          {!isPopup && (
+            <button
+              className="btn btn-secondary"
+              onClick={handleOpenInNewWindow}
+              title="Open PDF in new window"
+              style={{ padding: '0.25rem 0.5rem', marginLeft: '0.25rem' }}
+            >
+              <ExternalLink size={16} style={{ marginRight: '0.25rem', verticalAlign: 'middle' }} />
+              Open
+            </button>
+          )}
         </div>
       </div>
 
@@ -231,8 +344,8 @@ function PDFViewer({ pdfUrl, highlightPage }) {
       )}
 
       {/* Scrollable viewer */}
-      <div style={{
-        maxHeight: '75vh',
+      <div ref={viewerScrollRef} style={{
+        maxHeight: isPopup ? '95vh' : '75vh',
         overflowY: 'auto',
         overflowX: 'auto',
         border: '1px solid #dee2e6',
@@ -246,17 +359,35 @@ function PDFViewer({ pdfUrl, highlightPage }) {
             id={`pdf-page-${page.pageNumber}`}
             style={{
               marginBottom: '1rem',
-              border: highlightPage === page.pageNumber ? '3px solid #ffc107' : 'none',
+              border: fallbackHighlightPage === page.pageNumber ? '3px solid #ffc107' : 'none',
               borderRadius: '4px',
               overflow: 'hidden',
               width: `${zoom * 100}%`
             }}
           >
-            <img
-              src={page.dataUrl}
-              alt={`Page ${page.pageNumber}`}
-              style={{ width: '100%', display: 'block' }}
-            />
+            <div style={{ position: 'relative', lineHeight: 0 }}>
+              <img
+                src={page.dataUrl}
+                alt={`Page ${page.pageNumber}`}
+                style={{ width: '100%', display: 'block' }}
+              />
+              {overlay?.pageNumber === page.pageNumber && overlay.rects.map((r, i) => (
+                <div
+                  key={i}
+                  style={{
+                    position: 'absolute',
+                    left: `${r.left}%`,
+                    top: `${r.top}%`,
+                    width: `${r.width}%`,
+                    height: `${r.height}%`,
+                    backgroundColor: 'rgba(255, 193, 7, 0.35)',
+                    border: '1px solid rgba(255, 153, 0, 0.9)',
+                    borderRadius: '2px',
+                    pointerEvents: 'none'
+                  }}
+                />
+              ))}
+            </div>
             <div style={{
               textAlign: 'center',
               padding: '0.5rem',

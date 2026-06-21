@@ -24,6 +24,7 @@ function AnalyzePage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [codingFormData, setCodingFormData] = useState(null);
   const [responses, setResponses] = useState([]);
+  const [sourceTarget, setSourceTarget] = useState(null);
   const [error, setError] = useState('');
   const [apiConfig, setApiConfig] = useState(null);
   const [analysisProgress, setAnalysisProgress] = useState('');
@@ -112,6 +113,17 @@ function AnalyzePage() {
         setIsExtractingPdfText(false);
       }
     }
+  };
+
+  const handleSourceClick = (index) => {
+    const r = responses[index];
+    if (!r?.source) return;
+    // Bump nonce so re-clicking the same source re-fires the jump/highlight.
+    setSourceTarget(prev => ({
+      page: r.page,
+      quote: r.source,
+      nonce: (prev?.nonce ?? 0) + 1
+    }));
   };
 
   const handleRecordResponse = (index, response) => {
@@ -403,7 +415,7 @@ function AnalyzePage() {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
         <div>
           {pdfUrl ? (
-            <PDFViewer pdfUrl={pdfUrl} highlightPage={null} />
+            <PDFViewer pdfUrl={pdfUrl} sourceTarget={sourceTarget} />
           ) : (
             <div className="box" style={{ textAlign: 'center', color: '#adb5bd', padding: '4rem 1rem' }}>
               <FileText size={52} style={{ marginBottom: '0.75rem', opacity: 0.25 }} />
@@ -425,6 +437,7 @@ function AnalyzePage() {
                   setResponses(newResponses);
                 }}
                 onRecord={handleRecordResponse}
+                onSourceClick={handleSourceClick}
               />
             ) : (
               <p className="text-muted">Please upload a coding form on the Setup page</p>

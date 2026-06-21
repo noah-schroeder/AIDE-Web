@@ -296,11 +296,6 @@ function SetupPage() {
       codingFormData.headers.map(h => escapeHtml(row[h] || ''))
     );
 
-    // Escape JSON data for <script> block — prevent </script> injection
-    const jsonData = JSON.stringify([codingFormData.headers, ...codingFormData.rows.map(row =>
-      codingFormData.headers.map(header => row[header] || '')
-    )]).replace(/<\//g, '<\\/');
-
     const html = `
       <!DOCTYPE html>
       <html>
@@ -322,7 +317,7 @@ function SetupPage() {
         <h1>AIDE Coding Form</h1>
         <p><strong>File:</strong> ${safeFileName}</p>
         <p><strong>Total Entries:</strong> ${codingFormData.rows.length}</p>
-        <button class="download-btn" onclick="downloadExcel()">Download as Excel</button>
+        <button class="download-btn" id="aide-download-btn">Download as Excel</button>
         <table>
           <thead><tr>${safeHeaders.map(h => `<th>${h}</th>`).join('')}</tr></thead>
           <tbody>
@@ -331,21 +326,16 @@ function SetupPage() {
             `).join('')}
           </tbody>
         </table>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" integrity="sha512-WArB05dcHOG3KYsMnMfMBc7zWQKJUJhiXMGdv/E0VozdBTUhMuYS+nuvrYbSPNH8EXBbfsHIwbkWEbgy2bG0Q==" crossorigin="anonymous"></script>
-        <script>
-          function downloadExcel() {
-            var data = ${jsonData};
-            var ws = XLSX.utils.aoa_to_sheet(data);
-            var wb = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(wb, ws, 'Coding Form');
-            XLSX.writeFile(wb, 'aide_coding_form_' + new Date().toISOString().split('T')[0] + '.xlsx');
-          }
-        </script>
       </body>
       </html>
     `;
     newWindow.document.write(html);
     newWindow.document.close();
+
+    // Wire the download button to the bundled XLSX in this (opener) realm — no
+    // CDN script and no inline <script> with interpolated data.
+    const downloadBtn = newWindow.document.getElementById('aide-download-btn');
+    if (downloadBtn) downloadBtn.addEventListener('click', handleDownloadForm);
   };
 
   // Determine if models are grouped (OpenRouter) or flat array
