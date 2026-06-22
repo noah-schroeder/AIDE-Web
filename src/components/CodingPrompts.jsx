@@ -1,7 +1,7 @@
 import React, { useState, useImperativeHandle } from 'react';
 import { Info, Save, CheckCircle, RefreshCw } from 'lucide-react';
 
-function CodingPrompts({ prompts, responses, onResponseChange, onRecord }, ref) {
+function CodingPrompts({ prompts, responses, onResponseChange, onRecord, onSourceClick }, ref) {
   const [recordedIndices, setRecordedIndices] = useState(new Set());
   const [showSource, setShowSource] = useState(new Set());
 
@@ -95,7 +95,7 @@ function CodingPrompts({ prompts, responses, onResponseChange, onRecord }, ref) 
             <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
               <button
                 className="btn btn-info"
-                onClick={() => toggleSource(index)}
+                onClick={() => { toggleSource(index); onSourceClick?.(index); }}
                 disabled={!responses[index]?.source}
               >
                 <Info size={16} style={{ marginRight: '0.25rem', verticalAlign: 'middle' }} />
