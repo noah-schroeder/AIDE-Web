@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as pdfjsLib from 'pdfjs-dist';
-import { ZoomIn, ZoomOut, ExternalLink, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ZoomIn, ZoomOut, ExternalLink } from 'lucide-react';
 import { locateQuoteRects, parseTargetPage } from '../utils/pdfUtils';
 
 // Worker is configured in pdfUtils.js (imported by AnalyzePage before this component renders)
@@ -12,7 +12,6 @@ const ZOOM_STEP = 0.15;
 const ZOOM_MIN = 0.3;
 const ZOOM_MAX = 2.5;
 const ZOOM_DEFAULT = 1.0; // 1.0 = 100% of the container width
-const PAGES_PER_VIEW = 3; // Render only a few pages at a time
 
 function PDFViewer({ pdfUrl, sourceTarget, isPopup = false }) {
   const [pages, setPages] = useState([]);
@@ -20,7 +19,6 @@ function PDFViewer({ pdfUrl, sourceTarget, isPopup = false }) {
   const [error, setError] = useState(null);
   const [zoom, setZoom] = useState(ZOOM_DEFAULT);
   const [numPages, setNumPages] = useState(0);
-  const [currentStartPage, setCurrentStartPage] = useState(1);
   const [overlay, setOverlay] = useState(null); // { pageNumber, rects, nonce }
   const [pendingScroll, setPendingScroll] = useState(null); // { page, nonce }
   const pdfDocRef = useRef(null);
@@ -37,7 +35,6 @@ function PDFViewer({ pdfUrl, sourceTarget, isPopup = false }) {
     setError(null);
     setPages([]);
     setZoom(ZOOM_DEFAULT);
-    setCurrentStartPage(1);
     setOverlay(null);
     setPendingScroll(null);
 
@@ -77,17 +74,17 @@ function PDFViewer({ pdfUrl, sourceTarget, isPopup = false }) {
     };
   }, [pdfUrl]);
 
-  // Render visible pages when currentStartPage or pdf changes
+  // Render the entire document. Pages are rendered sequentially and appended as
+  // they finish, so the viewer fills in progressively rather than blocking.
   useEffect(() => {
     const pdf = pdfDocRef.current;
     if (!pdf || numPages === 0) return;
 
     let cancelled = false;
-    const endPage = Math.min(currentStartPage + PAGES_PER_VIEW - 1, numPages);
+    setPages([]);
 
-    const renderPages = async () => {
-      const renderedPages = [];
-      for (let i = currentStartPage; i <= endPage; i++) {
+    const renderAllPages = async () => {
+      for (let i = 1; i <= numPages; i++) {
         if (cancelled) return;
         try {
           const page = await pdf.getPage(i);
@@ -104,26 +101,21 @@ function PDFViewer({ pdfUrl, sourceTarget, isPopup = false }) {
           }).promise;
 
           if (cancelled) return;
-          renderedPages.push({
-            pageNumber: i,
-            dataUrl: canvas.toDataURL()
-          });
+          const dataUrl = canvas.toDataURL();
+          setPages(prev => [...prev, { pageNumber: i, dataUrl }]);
         } catch (err) {
           if (cancelled) return;
           console.error(`Error rendering page ${i}:`, err);
         }
       }
-      if (!cancelled) {
-        setPages(renderedPages);
-      }
     };
 
-    renderPages();
+    renderAllPages();
 
     return () => {
       cancelled = true;
     };
-  }, [currentStartPage, numPages]);
+  }, [numPages]);
 
   // Cleanup pdf document on unmount
   useEffect(() => {
@@ -148,9 +140,8 @@ function PDFViewer({ pdfUrl, sourceTarget, isPopup = false }) {
       return;
     }
 
-    // Bring the chunk containing the target page into view, then scroll to it.
-    const chunkStart = 1 + Math.floor((targetPage - 1) / PAGES_PER_VIEW) * PAGES_PER_VIEW;
-    setCurrentStartPage(chunkStart);
+    // Every page is rendered, so just request a scroll to the target page (it may
+    // still be rendering if it's near the end — the scroll effect waits for it).
     setPendingScroll({ page: targetPage, nonce });
 
     // Locate the quote independently of what's currently rendered.
@@ -241,20 +232,8 @@ function PDFViewer({ pdfUrl, sourceTarget, isPopup = false }) {
     win.focus();
   };
 
-  const endPage = Math.min(currentStartPage + PAGES_PER_VIEW - 1, numPages);
-  const canGoPrev = currentStartPage > 1;
-  const canGoNext = endPage < numPages;
-
   // When the source quote couldn't be located, fall back to highlighting the whole page.
   const fallbackHighlightPage = overlay && overlay.rects.length === 0 ? overlay.pageNumber : null;
-
-  const handlePrevPages = () => {
-    setCurrentStartPage(prev => Math.max(1, prev - PAGES_PER_VIEW));
-  };
-
-  const handleNextPages = () => {
-    setCurrentStartPage(prev => Math.min(prev + PAGES_PER_VIEW, numPages));
-  };
 
   if (loading) {
     return (
@@ -318,34 +297,18 @@ function PDFViewer({ pdfUrl, sourceTarget, isPopup = false }) {
         </div>
       </div>
 
-      {/* Page navigation */}
-      {numPages > PAGES_PER_VIEW && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.75rem', marginBottom: '0.75rem' }}>
-          <button
-            className="btn btn-secondary"
-            onClick={handlePrevPages}
-            disabled={!canGoPrev}
-            style={{ padding: '0.25rem 0.5rem' }}
-          >
-            <ChevronLeft size={16} />
-          </button>
-          <span style={{ fontSize: '0.875rem', color: '#495057' }}>
-            Pages {currentStartPage}–{endPage} of {numPages}
-          </span>
-          <button
-            className="btn btn-secondary"
-            onClick={handleNextPages}
-            disabled={!canGoNext}
-            style={{ padding: '0.25rem 0.5rem' }}
-          >
-            <ChevronRight size={16} />
-          </button>
+      {/* Page count */}
+      {numPages > 0 && (
+        <div style={{ textAlign: 'center', marginBottom: '0.75rem', fontSize: '0.875rem', color: '#495057' }}>
+          {pages.length < numPages
+            ? `Rendering page ${pages.length} of ${numPages}…`
+            : `${numPages} page${numPages === 1 ? '' : 's'}`}
         </div>
       )}
 
-      {/* Scrollable viewer */}
+      {/* Scrollable viewer — fixed height so you see ~a page at a time and scroll the whole document */}
       <div ref={viewerScrollRef} style={{
-        maxHeight: isPopup ? '95vh' : '75vh',
+        height: isPopup ? '95vh' : '80vh',
         overflowY: 'auto',
         overflowX: 'auto',
         border: '1px solid #dee2e6',
